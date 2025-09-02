@@ -1,5 +1,7 @@
 
 import React, { useState, useCallback, useRef } from 'react';
+import ReactCrop, { type Crop, type PixelCrop } from 'react-image-crop';
+import 'react-image-crop/dist/ReactCrop.css';
 import { MSX_PALETTE } from './constants';
 import type { RGBColor } from './types';
 
@@ -64,6 +66,8 @@ const ImagePreview: React.FC<{ title: string; imageSrc: string | null; isLoading
 
 export default function App() {
     const [originalImage, setOriginalImage] = useState<string | null>(null);
+    const [crop, setCrop] = useState<Crop>();
+    const [completedCrop, setCompletedCrop] = useState<PixelCrop | null>(null);
     const [convertedImage, setConvertedImage] = useState<string | null>(null);
     const [targetWidth, setTargetWidth] = useState<number>(64);
     const [targetHeight, setTargetHeight] = useState<number>(64);
@@ -71,6 +75,7 @@ export default function App() {
     const [error, setError] = useState<string | null>(null);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const imgRef = useRef<HTMLImageElement>(null);
 
     const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
@@ -80,13 +85,18 @@ export default function App() {
                 setOriginalImage(e.target?.result as string);
                 setConvertedImage(null);
                 setError(null);
+                setCrop(undefined); // Reset crop on new image
+                setCompletedCrop(null);
             };
             reader.readAsDataURL(file);
         }
     };
 
     const handleConvert = useCallback(async () => {
-        if (!originalImage) return;
+        if (!originalImage || !completedCrop || !imgRef.current) {
+            setError('Please upload an image and select a crop area first.');
+            return;
+        }
 
         setIsLoading(true);
         setError(null);
@@ -95,60 +105,80 @@ export default function App() {
         await new Promise(resolve => setTimeout(resolve, 50)); // Allow UI to update
 
         try {
-            const image = new Image();
-            image.src = originalImage;
+            const image = imgRef.current;
+            const canvas = document.createElement('canvas');
+            const scaleX = image.naturalWidth / image.width;
+            const scaleY = image.naturalHeight / image.height;
+            const cropX = completedCrop.x * scaleX;
+            const cropY = completedCrop.y * scaleY;
+            const cropWidth = completedCrop.width * scaleX;
+            const cropHeight = completedCrop.height * scaleY;
 
-            image.onload = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = targetWidth;
-                canvas.height = targetHeight;
-                const ctx = canvas.getContext('2d');
-
-                if (!ctx) {
-                    throw new Error('Could not get canvas context');
-                }
-                
-                // CRITICAL: Disables blurring for a pixelated effect
-                ctx.imageSmoothingEnabled = false;
-
-                // 1. Resize the image with nearest-neighbor scaling
-                ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
-
-                // 2. Apply MSX color palette
-                const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
-                const data = imageData.data;
-
-                for (let i = 0; i < data.length; i += 4) {
-                    const r = data[i];
-                    const g = data[i + 1];
-                    const b = data[i + 2];
-                    
-                    const closestColor = findClosestMsxColor({ r, g, b });
-                    
-                    data[i] = closestColor.r;
-                    data[i + 1] = closestColor.g;
-                    data[i + 2] = closestColor.b;
-                    // Keep alpha at 255 (fully opaque)
-                    data[i+3] = 255;
-                }
-                
-                ctx.putImageData(imageData, 0, 0);
-                
-                setConvertedImage(canvas.toDataURL('image/png'));
-                setIsLoading(false);
-            };
-
-            image.onerror = () => {
-                setError('Failed to load the image. Please try a different file.');
-                setIsLoading(false);
+            // Create a temporary canvas to draw the cropped image
+            const cropCanvas = document.createElement('canvas');
+            cropCanvas.width = cropWidth;
+            cropCanvas.height = cropHeight;
+            const cropCtx = cropCanvas.getContext('2d');
+            if (!cropCtx) {
+                throw new Error('Could not get crop canvas context');
             }
 
+            cropCtx.drawImage(
+                image,
+                cropX,
+                cropY,
+                cropWidth,
+                cropHeight,
+                0,
+                0,
+                cropWidth,
+                cropHeight
+            );
+
+            // Now, resize the cropped image to the target dimensions
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+            const ctx = canvas.getContext('2d');
+
+            if (!ctx) {
+                throw new Error('Could not get canvas context');
+            }
+            
+            // CRITICAL: Disables blurring for a pixelated effect
+            ctx.imageSmoothingEnabled = false;
+
+            // 1. Resize the cropped image with nearest-neighbor scaling
+            ctx.drawImage(cropCanvas, 0, 0, targetWidth, targetHeight);
+
+            // 2. Apply MSX color palette
+            const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+            const data = imageData.data;
+
+            for (let i = 0; i < data.length; i += 4) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                
+                const closestColor = findClosestMsxColor({ r, g, b });
+                
+                data[i] = closestColor.r;
+                data[i + 1] = closestColor.g;
+                data[i + 2] = closestColor.b;
+                // Keep alpha at 255 (fully opaque)
+                data[i+3] = 255;
+            }
+            
+            ctx.putImageData(imageData, 0, 0);
+            
+            setConvertedImage(canvas.toDataURL('image/png'));
+            setIsLoading(false);
+
         } catch (err) {
-            setError('An unexpected error occurred during conversion.');
+            setError(err instanceof Error ? err.message : 'An unexpected error occurred during conversion.');
             setIsLoading(false);
         }
 
-    }, [originalImage, targetWidth, targetHeight]);
+    }, [originalImage, completedCrop, targetWidth, targetHeight]);
 
     const handleDownload = () => {
         if (!convertedImage) return;
@@ -227,7 +257,7 @@ export default function App() {
                             <h2 className="text-xl font-semibold mb-3 text-msx-accent">3. Process</h2>
                             <button
                                 onClick={handleConvert}
-                                disabled={!originalImage || isLoading}
+                                disabled={!originalImage || !completedCrop || isLoading}
                                 className="w-full bg-msx-accent hover:bg-msx-accent-hover text-black font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed"
                             >
                                 <ConvertIcon className="w-6 h-6 mr-2" />
@@ -254,7 +284,30 @@ export default function App() {
                     
                     {/* Previews Column */}
                     <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-8">
-                        <ImagePreview title="Original Image" imageSrc={originalImage} />
+                        <div className="bg-msx-panel border border-msx-border rounded-lg p-4 flex flex-col items-center justify-center w-full h-full min-h-[300px] md:min-h-0">
+                            <h3 className="text-lg font-bold text-msx-accent mb-4">Original Image</h3>
+                            <div className="flex-grow flex items-center justify-center w-full bg-black/20 rounded-md overflow-hidden">
+                                {originalImage ? (
+                                    <ReactCrop
+                                        crop={crop}
+                                        onChange={(_, percentCrop) => setCrop(percentCrop)}
+                                        onComplete={(c) => setCompletedCrop(c)}
+                                        aspect={targetWidth / targetHeight}
+                                        className="max-w-full max-h-full"
+                                    >
+                                        <img
+                                            ref={imgRef}
+                                            src={originalImage}
+                                            alt="Original"
+                                            className="max-w-full max-h-full object-contain"
+                                            style={{ imageRendering: 'pixelated' }}
+                                        />
+                                    </ReactCrop>
+                                ) : (
+                                    <p className="text-msx-text-dim">Upload an image to begin</p>
+                                )}
+                            </div>
+                        </div>
                         <div className="flex flex-col gap-4">
                            <ImagePreview title="MSX Sprite Preview" imageSrc={convertedImage} isLoading={isLoading} />
                             <button
