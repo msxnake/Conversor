@@ -4,6 +4,8 @@ import ReactCrop, { type Crop, type PixelCrop } from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import { MSX_PALETTE } from './constants';
 import type { RGBColor } from './types';
+import { convertImageToMSXScreen2, findClosestMsxColor } from './src/imageConversion';
+import { ColorSubstitutionPanel } from './src/ColorSubstitutionPanel';
 
 const UploadIcon: React.FC<{ className?: string }> = ({ className }) => (
     <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -27,27 +29,6 @@ const LoadingSpinner: React.FC = () => (
     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-msx-accent"></div>
 );
 
-const colorDistance = (c1: RGBColor, c2: RGBColor): number => {
-    const rDiff = c1.r - c2.r;
-    const gDiff = c1.g - c2.g;
-    const bDiff = c1.b - c2.b;
-    return rDiff * rDiff + gDiff * gDiff + bDiff * bDiff;
-};
-
-const findClosestMsxColor = (color: RGBColor): RGBColor => {
-    let minDistance = Infinity;
-    let closestColor = MSX_PALETTE[0];
-
-    for (const msxColor of MSX_PALETTE) {
-        const distance = colorDistance(color, msxColor);
-        if (distance < minDistance) {
-            minDistance = distance;
-            closestColor = msxColor;
-        }
-    }
-    return closestColor;
-};
-
 const ImagePreview: React.FC<{ title: string; imageSrc: string | null; isLoading?: boolean }> = ({ title, imageSrc, isLoading = false }) => (
     <div className="bg-msx-panel border border-msx-border rounded-lg p-4 flex flex-col items-center justify-center w-full h-full min-h-[300px] md:min-h-0">
         <h3 className="text-lg font-bold text-msx-accent mb-4">{title}</h3>
@@ -69,10 +50,12 @@ export default function App() {
     const [crop, setCrop] = useState<Crop>();
     const [completedCrop, setCompletedCrop] = useState<PixelCrop | null>(null);
     const [convertedImage, setConvertedImage] = useState<string | null>(null);
-    const [targetWidth, setTargetWidth] = useState<number>(64);
-    const [targetHeight, setTargetHeight] = useState<number>(64);
+    const [convertedImageData, setConvertedImageData] = useState<ImageData | null>(null);
+    const [targetWidth, setTargetWidth] = useState<number>(256);
+    const [targetHeight, setTargetHeight] = useState<number>(192);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
+    const [showColorSubPanel, setShowColorSubPanel] = useState<boolean>(false);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const imgRef = useRef<HTMLImageElement>(null);
@@ -84,6 +67,7 @@ export default function App() {
             reader.onload = (e) => {
                 setOriginalImage(e.target?.result as string);
                 setConvertedImage(null);
+                setConvertedImageData(null);
                 setError(null);
                 setCrop(undefined); // Reset crop on new image
                 setCompletedCrop(null);
@@ -92,7 +76,7 @@ export default function App() {
         }
     };
 
-    const handleConvert = useCallback(async () => {
+    const handleConvert = useCallback(async (conversionType: 'sprite' | 'screen2') => {
         if (!originalImage || !completedCrop || !imgRef.current) {
             setError('Please upload an image and select a crop area first.');
             return;
@@ -101,6 +85,7 @@ export default function App() {
         setIsLoading(true);
         setError(null);
         setConvertedImage(null);
+        setConvertedImageData(null);
 
         await new Promise(resolve => setTimeout(resolve, 50)); // Allow UI to update
 
@@ -114,7 +99,6 @@ export default function App() {
             const cropWidth = completedCrop.width * scaleX;
             const cropHeight = completedCrop.height * scaleY;
 
-            // Create a temporary canvas to draw the cropped image
             const cropCanvas = document.createElement('canvas');
             cropCanvas.width = cropWidth;
             cropCanvas.height = cropHeight;
@@ -135,7 +119,6 @@ export default function App() {
                 cropHeight
             );
 
-            // Now, resize the cropped image to the target dimensions
             canvas.width = targetWidth;
             canvas.height = targetHeight;
             const ctx = canvas.getContext('2d');
@@ -144,32 +127,32 @@ export default function App() {
                 throw new Error('Could not get canvas context');
             }
             
-            // CRITICAL: Disables blurring for a pixelated effect
             ctx.imageSmoothingEnabled = false;
-
-            // 1. Resize the cropped image with nearest-neighbor scaling
             ctx.drawImage(cropCanvas, 0, 0, targetWidth, targetHeight);
 
-            // 2. Apply MSX color palette
-            const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
-            const data = imageData.data;
-
-            for (let i = 0; i < data.length; i += 4) {
-                const r = data[i];
-                const g = data[i + 1];
-                const b = data[i + 2];
-                
-                const closestColor = findClosestMsxColor({ r, g, b });
-                
-                data[i] = closestColor.r;
-                data[i + 1] = closestColor.g;
-                data[i + 2] = closestColor.b;
-                // Keep alpha at 255 (fully opaque)
-                data[i+3] = 255;
+            let imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+            
+            if (conversionType === 'screen2') {
+                imageData = convertImageToMSXScreen2(imageData);
+            } else {
+                const data = imageData.data;
+                for (let i = 0; i < data.length; i += 4) {
+                    const r = data[i];
+                    const g = data[i + 1];
+                    const b = data[i + 2];
+                    
+                    const closestColor = findClosestMsxColor({ r, g, b });
+                    
+                    data[i] = closestColor.r;
+                    data[i + 1] = closestColor.g;
+                    data[i + 2] = closestColor.b;
+                    data[i+3] = 255;
+                }
             }
             
             ctx.putImageData(imageData, 0, 0);
             
+            setConvertedImageData(imageData);
             setConvertedImage(canvas.toDataURL('image/png'));
             setIsLoading(false);
 
@@ -184,10 +167,46 @@ export default function App() {
         if (!convertedImage) return;
         const link = document.createElement('a');
         link.href = convertedImage;
-        link.download = `msx-sprite-${targetWidth}x${targetHeight}.png`;
+        link.download = `msx-image-${targetWidth}x${targetHeight}.png`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+    };
+
+    const handleColorSubstitution = (colorMap: Map<string, RGBColor>) => {
+        if (!convertedImageData) return;
+
+        const newImageData = new ImageData(convertedImageData.width, convertedImageData.height);
+        const data = newImageData.data;
+        const oldData = convertedImageData.data;
+
+        const toKey = (r: number, g: number, b: number) => `${r},${g},${b}`;
+
+        for (let i = 0; i < oldData.length; i += 4) {
+            const key = toKey(oldData[i], oldData[i+1], oldData[i+2]);
+            const newColor = colorMap.get(key);
+            if (newColor) {
+                data[i] = newColor.r;
+                data[i + 1] = newColor.g;
+                data[i + 2] = newColor.b;
+                data[i + 3] = 255;
+            } else {
+                data[i] = oldData[i];
+                data[i + 1] = oldData[i+1];
+                data[i + 2] = oldData[i+2];
+                data[i + 3] = oldData[i+3];
+            }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = newImageData.width;
+        canvas.height = newImageData.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            ctx.putImageData(newImageData, 0, 0);
+            setConvertedImage(canvas.toDataURL('image/png'));
+            setConvertedImageData(newImageData);
+        }
     };
 
     return (
@@ -195,10 +214,10 @@ export default function App() {
             <div className="container mx-auto max-w-7xl">
                 <header className="text-center mb-8">
                     <h1 className="text-4xl sm:text-5xl font-bold text-white tracking-wide">
-                        MSX <span className="text-msx-accent">Retro Sprite</span> Converter
+                        MSX <span className="text-msx-accent">Retro Image</span> Converter
                     </h1>
                     <p className="text-msx-text-dim mt-2 max-w-2xl mx-auto">
-                        Convert high-resolution images to pixel-perfect, MSX-palette sprites without blurring.
+                        Convert high-resolution images to pixel-perfect, MSX-palette images without blurring.
                     </p>
                 </header>
 
@@ -255,14 +274,24 @@ export default function App() {
                         {/* 3. Convert */}
                         <div>
                             <h2 className="text-xl font-semibold mb-3 text-msx-accent">3. Process</h2>
-                            <button
-                                onClick={handleConvert}
-                                disabled={!originalImage || !completedCrop || isLoading}
-                                className="w-full bg-msx-accent hover:bg-msx-accent-hover text-black font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed"
-                            >
-                                <ConvertIcon className="w-6 h-6 mr-2" />
-                                {isLoading ? 'Converting...' : 'Convert to MSX Sprite'}
-                            </button>
+                            <div className="space-y-2">
+                                <button
+                                    onClick={() => handleConvert('sprite')}
+                                    disabled={!originalImage || !completedCrop || isLoading}
+                                    className="w-full bg-msx-accent hover:bg-msx-accent-hover text-black font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed"
+                                >
+                                    <ConvertIcon className="w-6 h-6 mr-2" />
+                                    {isLoading ? 'Converting...' : 'Convert to MSX Sprite'}
+                                </button>
+                                <button
+                                    onClick={() => handleConvert('screen2')}
+                                    disabled={!originalImage || !completedCrop || isLoading}
+                                    className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed"
+                                >
+                                    <ConvertIcon className="w-6 h-6 mr-2" />
+                                    {isLoading ? 'Converting...' : 'Convert to Screen 2'}
+                                </button>
+                            </div>
                              {error && <p className="text-red-400 mt-2 text-sm">{error}</p>}
                         </div>
 
@@ -309,18 +338,34 @@ export default function App() {
                             </div>
                         </div>
                         <div className="flex flex-col gap-4">
-                           <ImagePreview title="MSX Sprite Preview" imageSrc={convertedImage} isLoading={isLoading} />
-                            <button
-                                onClick={handleDownload}
-                                disabled={!convertedImage || isLoading}
-                                className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed mt-4"
-                            >
-                                <DownloadIcon className="w-6 h-6 mr-2" />
-                                Download Sprite
-                            </button>
+                           <ImagePreview title="MSX Image Preview" imageSrc={convertedImage} isLoading={isLoading} />
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={handleDownload}
+                                    disabled={!convertedImage || isLoading}
+                                    className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed"
+                                >
+                                    <DownloadIcon className="w-6 h-6 mr-2" />
+                                    Download Image
+                                </button>
+                                <button
+                                    onClick={() => setShowColorSubPanel(true)}
+                                    disabled={!convertedImage || isLoading}
+                                    className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-colors duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed"
+                                >
+                                    Substitute Colors
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </main>
+                {showColorSubPanel && (
+                    <ColorSubstitutionPanel
+                        imageData={convertedImageData}
+                        onSubstitute={handleColorSubstitution}
+                        onClose={() => setShowColorSubPanel(false)}
+                    />
+                )}
             </div>
         </div>
     );
